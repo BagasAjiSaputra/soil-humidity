@@ -57,6 +57,16 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    return NextResponse.json(
+      { success: false, error: "Database configuration (Supabase) is missing in .env" },
+      { status: 500 }
+    );
+  }
+
   try {
     const body = await request.json();
     
@@ -65,25 +75,58 @@ export async function POST(request: NextRequest) {
     console.log(`[${new Date().toISOString()}] Received Sensor Data:`, JSON.stringify(body, null, 2));
     console.log("-----------------------------------------");
 
-    // Extract common fields for soil humidity and weather
-    const { deviceId, humidity, moisture, temperature } = body;
+    // Extract fields
+    const { moisture, humidity, temperature } = body;
 
-    // You can process the data here (e.g. save to database)
-    // For now, we will return the received data in the response body.
+    // Validate moisture (must not be empty since it is NOT NULL in database)
+    if (moisture === undefined || moisture === null) {
+      return NextResponse.json(
+        { success: false, error: "Field 'moisture' is required and cannot be null" },
+        { status: 400 }
+      );
+    }
+
+    // Insert into Supabase via REST API
+    // Note: The fields in public.sensor are character varying, so we convert them to String
+    const dbResponse = await fetch(`${supabaseUrl}/rest/v1/sensor`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": supabaseKey,
+        "Authorization": `Bearer ${supabaseKey}`,
+        "Prefer": "return=representation", // Request return of inserted row
+      },
+      body: JSON.stringify({
+        moisture: String(moisture),
+        humidity: humidity !== undefined && humidity !== null ? String(humidity) : null,
+        temperature: temperature !== undefined && temperature !== null ? String(temperature) : null,
+      }),
+    });
+
+    if (!dbResponse.ok) {
+      const errorText = await dbResponse.text();
+      console.error("Supabase Database Insert Error:", errorText);
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: "Failed to save sensor data to database", 
+          details: errorText 
+        },
+        { status: dbResponse.status }
+      );
+    }
+
+    const insertedRows = await dbResponse.json();
+    const insertedData = insertedRows[0] || null;
+
     return NextResponse.json({
       success: true,
-      message: "Sensor data received successfully",
-      data: {
-        deviceId: deviceId || "ESP32-Default",
-        humidity: typeof humidity === "number" ? humidity : null,
-        moisture: typeof moisture === "number" ? moisture : null,
-        temperature: typeof temperature === "number" ? temperature : null,
-        timestamp: new Date().toISOString(),
-      },
+      message: "Sensor data saved to database successfully",
+      data: insertedData,
     });
   } catch (error) {
     return NextResponse.json(
-      { success: false, error: "Invalid JSON body format" },
+      { success: false, error: "Invalid JSON body format or server error" },
       { status: 400 }
     );
   }
