@@ -65,22 +65,40 @@ export async function POST(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
+    console.error("Database configuration missing in environment variables.");
     return NextResponse.json(
       { success: false, error: "Database configuration (Supabase) is missing in .env" },
       { status: 500 }
     );
   }
 
+  // Parse JSON Body
+  let body;
   try {
-    const body = await request.json();
-    
+    body = await request.json();
+  } catch (error) {
+    return NextResponse.json(
+      { success: false, error: "Invalid JSON body format" },
+      { status: 400 }
+    );
+  }
+
+  try {
     // Log the received data in the console for verification
     console.log("-----------------------------------------");
     console.log(`[${new Date().toISOString()}] Received Sensor Data:`, JSON.stringify(body, null, 2));
     console.log("-----------------------------------------");
 
     // Extract fields
-    const { moisture, humidity, temperature } = body;
+    const { 
+      moisture, 
+      humidity, 
+      temperature, 
+      deviceId, 
+      cpuTemperature, 
+      hallMagnetic, 
+      touchRaw 
+    } = body;
 
     // Validate moisture (must not be empty since it is NOT NULL in database)
     if (moisture === undefined || moisture === null) {
@@ -90,9 +108,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Insert into Supabase via REST API
-    // Note: The fields in public.sensor are character varying, so we convert them to String
-    const dbResponse = await fetch(`${supabaseUrl}/rest/v1/sensor`, {
+    // Insert into 'sensor' table promise
+    const sensorInsertPromise = fetch(`${supabaseUrl}/rest/v1/sensor`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -107,31 +124,71 @@ export async function POST(request: NextRequest) {
       }),
     });
 
-    if (!dbResponse.ok) {
-      const errorText = await dbResponse.text();
-      console.error("Supabase Database Insert Error:", errorText);
+    // Insert into 'system_logs' table promise
+    const systemLogsInsertPromise = fetch(`${supabaseUrl}/rest/v1/system_logs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": supabaseKey,
+        "Authorization": `Bearer ${supabaseKey}`,
+        "Prefer": "return=representation", // Request return of inserted row
+      },
+      body: JSON.stringify({
+        device_id: deviceId || "ESP32-Default",
+        cpu_temperature: cpuTemperature !== undefined && cpuTemperature !== null ? String(cpuTemperature) : null,
+        hall_magnetic: hallMagnetic !== undefined && hallMagnetic !== null ? String(hallMagnetic) : null,
+        touch_raw: touchRaw !== undefined && touchRaw !== null ? String(touchRaw) : null,
+      }),
+    });
+
+    // Execute insertions concurrently
+    const [sensorRes, systemLogRes] = await Promise.all([
+      sensorInsertPromise,
+      systemLogsInsertPromise,
+    ]);
+
+    // Handle sensor insert failure
+    if (!sensorRes.ok) {
+      const errorText = await sensorRes.text();
+      console.error("Supabase Sensor Table Insert Error:", errorText);
       return NextResponse.json(
         { 
           success: false, 
-          error: "Failed to save sensor data to database", 
+          error: "Failed to save sensor data to 'sensor' table", 
           details: errorText 
         },
-        { status: dbResponse.status }
+        { status: sensorRes.status }
       );
     }
 
-    const insertedRows = await dbResponse.json();
-    const insertedData = insertedRows[0] || null;
+    // Handle system logs insert failure
+    if (!systemLogRes.ok) {
+      const errorText = await systemLogRes.text();
+      console.error("Supabase System Logs Table Insert Error:", errorText);
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: "Failed to save system logs to 'system_logs' table", 
+          details: errorText 
+        },
+        { status: systemLogRes.status }
+      );
+    }
+
+    const sensorDataRows = await sensorRes.json();
+    const systemLogRows = await systemLogRes.json();
 
     return NextResponse.json({
       success: true,
-      message: "Sensor data saved to database successfully",
-      data: insertedData,
+      message: "Sensor and system log data saved successfully",
+      sensorData: sensorDataRows[0] || null,
+      systemLogData: systemLogRows[0] || null,
     });
   } catch (error) {
+    console.error("Unexpected server error in POST handler:", error);
     return NextResponse.json(
-      { success: false, error: "Invalid JSON body format or server error" },
-      { status: 400 }
+      { success: false, error: "Internal server error occurred", details: String(error) },
+      { status: 500 }
     );
   }
 }
